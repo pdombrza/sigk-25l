@@ -5,7 +5,7 @@ import torchvision.transforms as transforms
 from torchvision.io import ImageReadMode, read_image
 
 
-class DIVDataset(Dataset):
+class ImageDataset(Dataset):
     def __init__(self, data, transforms=None):
         self.data = data
         self.transforms = transforms
