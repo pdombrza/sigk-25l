@@ -15,7 +15,6 @@ class DownBlock(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-
     def forward(self, x):
         return self.down_block(x)
 
@@ -25,7 +24,7 @@ class UpBlock(nn.Module):
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
 
         self.up_block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels + out_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
@@ -52,11 +51,11 @@ class UNet(nn.Module):
         self.bottleneck = nn.Sequential(
             nn.Conv2d(32*2**num_unet_blocks, 32*2**num_unet_blocks, kernel_size=3, padding=1),
             nn.BatchNorm2d(32*2**num_unet_blocks),
-            nn.Dropout2d(0.5, inplace=True),
+            nn.Dropout2d(0.5),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(32*2**num_unet_blocks, 32*2**num_unet_blocks, kernel_size=3, padding=1),
             nn.BatchNorm2d(32*2**num_unet_blocks),
-            nn.Dropout2d(0.5, inplace=True),
+            nn.Dropout2d(0.5),
             nn.LeakyReLU(0.2, inplace=True),
         )
         self.up_blocks = nn.ModuleList([UpBlock(32*2**(num_unet_blocks-i), 32*2**(num_unet_blocks-i-1)) for i in range(num_unet_blocks)])
@@ -65,6 +64,7 @@ class UNet(nn.Module):
         )
 
     def forward(self, x):
+        residual = x
         x = self.conv1(x)
         x = self.batch_norm1(x)
         x = self.leaky_relu(x)
@@ -76,4 +76,4 @@ class UNet(nn.Module):
         for up_block in self.up_blocks:
             x = up_block(x, skip_connections.pop())
         x = self.out_layers(x)
-        return x
+        return x + residual
