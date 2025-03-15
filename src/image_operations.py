@@ -1,5 +1,4 @@
 from PIL import Image, ImageOps
-import matplotlib.pyplot as plt
 
 def resize_stretch(image, target_size=(256, 256)):
     """Resize image directly to target_size (may cause distortion)."""
@@ -30,9 +29,3 @@ def resize_with_padding(image, target_size=(256, 256), fill_color=(0, 0, 0)):
     delta_h = target_size[1] - image.size[1]
     padding = (delta_w // 2, delta_h // 2, delta_w - (delta_w // 2), delta_h - (delta_h // 2))
     return ImageOps.expand(image, padding, fill_color)
-
-image = Image.open("0027x4m.png")
-resized_image = resize_with_padding(image)
-plt.imshow(resized_image)
-plt.axis("off")  # Hide axes
-plt.show()
