@@ -18,9 +18,8 @@ def add_gaussian_noise(image, sigma=0.01):
     noisy_image = random_noise(image_np, mode='gaussian', var=sigma**2)
     return Image.fromarray((noisy_image * 255).astype(np.uint8))
 
-# Dataset class
 class NoisyDataset(Dataset):
-    def __init__(self, root_folder, transform=None, resize_func=resize_stretch, sigma=0.01):
+    def __init__(self, root_folder, transform=None, resize_func=resize_stretch, sigma=0.02):
         self.transform = transform
         self.sigma = sigma
         self.resize_func = resize_func if resize_func else (lambda x: x)
@@ -48,7 +47,7 @@ class NoisyDataset(Dataset):
             image = self.transform(image)
             noisy_image = self.transform(noisy_image)
 
-        return noisy_image, image  # (input, target)
+        return noisy_image, image
 
 transform = transforms.Compose([
     transforms.ToTensor(),
@@ -70,18 +69,17 @@ class ResidualBlock(nn.Module):
         self.residual_match = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x):
-        residual = self.residual_match(x)  # Match channels if needed
+        residual = self.residual_match(x)
         return self.layers(x) + residual
 
 class Autoencoder(nn.Module):
     def __init__(self):
         super(Autoencoder, self).__init__()
         
-        # Encoder
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2, 2),
+            nn.AvgPool2d(2, 2),
             nn.Conv2d(16, 64, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
         )
@@ -109,7 +107,6 @@ def combined_loss(output, target, alpha=0.5, beta=0.5):
     ssim_loss = 1 - ssim(output, target) 
     return alpha * mse_loss + beta * ssim_loss
 
-# criterion = nn.MSELoss().to(device)
 optimizer = optim.Adam(autoencoder.parameters(), lr=0.001)
 
 num_epochs = 50
@@ -128,7 +125,7 @@ for epoch in range(num_epochs):
         optimizer.step()
 
         running_loss += loss.item()
-    losses.append(running_loss)
+    losses.append(running_loss/len(dataloader))
     print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(dataloader):.4f}")
 
 print("Training complete!")
@@ -139,35 +136,48 @@ def compare_with_bilateral(noisy_img, clean_img, autoencoder):
         noisy_tensor = transform(noisy_img).unsqueeze(0).to(device)
         autoencoder_output = autoencoder(noisy_tensor).squeeze(0).cpu().numpy().transpose(1, 2, 0)
 
-    # Apply bilateral filtering
     noisy_np = np.array(noisy_img) / 255.0
-    bilateral_output = denoise_bilateral(noisy_np, sigma_color=0.065, sigma_spatial=15, channel_axis=-1)
+    bilateral_output = denoise_bilateral(noisy_np, sigma_color=0.02, sigma_spatial=5, channel_axis=-1)
 
-    # Convert to images
     autoencoder_output = np.clip(autoencoder_output, 0, 1)
     bilateral_output = np.clip(bilateral_output, 0, 1)
 
-    # Plot results
-    fig, ax = plt.subplots(1, 4, figsize=(12, 4))
-    ax[0].imshow(noisy_img)
-    ax[0].set_title("Noisy Image")
-    ax[1].imshow(autoencoder_output)
-    ax[1].set_title("Autoencoder Output")
-    ax[2].imshow(bilateral_output)
-    ax[2].set_title("Bilateral Filter Output")
-    ax[3].imshow(clean_img)
-    ax[3].set_title("Clean Image")
+    fig, ax = plt.subplots(2, 2, figsize=(10, 10))  # 2 rows, 2 columns
 
-    for a in ax:
+    # Top row
+    ax[0, 0].imshow(clean_img)
+    ax[0, 0].set_title("Oryginalny obraz")
+
+    ax[0, 1].imshow(autoencoder_output)
+    ax[0, 1].set_title("Wyjście autoenkodera")
+
+    ax[1, 0].imshow(bilateral_output)
+    ax[1, 0].set_title("Wyjście filtra dwustronnego")
+
+    ax[1, 1].imshow(noisy_img)
+    ax[1, 1].set_title("Obraz zaszumiony")
+
+
+    for a in ax.ravel():
         a.axis("off")
     plt.show()
 
-# Select a sample for comparison
-sample_idx = 40
-noisy_sample, clean_sample = dataset[sample_idx]
+def plot():
+    plt.figure(figsize=(8, 5))
+    plt.plot(range(1, len(losses) + 1), losses, marker='o', linestyle='-', color='b', label='Training Loss')
+    plt.xlabel('Epoka')
+    plt.ylabel('MSE + SSIM')
+    plt.title('Postęp uczenia modelu')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
-# Convert back to PIL for display
-noisy_pil = transforms.ToPILImage()(noisy_sample)
-clean_pil = transforms.ToPILImage()(clean_sample)
-
-compare_with_bilateral(noisy_pil, clean_pil, autoencoder)
+noisy_sample, clean_sample = dataset[40]
+compare_with_bilateral(transforms.ToPILImage()(noisy_sample), transforms.ToPILImage()(clean_sample), autoencoder)
+noisy_sample, clean_sample = dataset[101]
+compare_with_bilateral(transforms.ToPILImage()(noisy_sample), transforms.ToPILImage()(clean_sample), autoencoder)
+noisy_sample, clean_sample = dataset[202]
+compare_with_bilateral(transforms.ToPILImage()(noisy_sample), transforms.ToPILImage()(clean_sample), autoencoder)
+noisy_sample, clean_sample = dataset[203]
+compare_with_bilateral(transforms.ToPILImage()(noisy_sample), transforms.ToPILImage()(clean_sample), autoencoder)
+plot()
