@@ -12,6 +12,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from skimage.restoration import denoise_bilateral
 from image_operations import resize_stretch
+import lpips
+import torchmetrics.functional as TF
 
 def add_gaussian_noise(image, sigma=0.01):
     image_np = np.array(image) / 255.0
@@ -53,7 +55,7 @@ transform = transforms.Compose([
     transforms.ToTensor(),
 ])
 
-dataset = NoisyDataset(root_folder="data/DIV2K_train_LR_mild", transform=transform, sigma=0.1)
+dataset = NoisyDataset(root_folder="data/DIV2K_train_LR_mild", transform=transform, sigma=0.01)
 dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
 class ResidualBlock(nn.Module):
@@ -112,8 +114,42 @@ optimizer = optim.Adam(autoencoder.parameters(), lr=0.001)
 num_epochs = 50
 losses = []
 
+# Initialize LPIPS loss function (AlexNet backbone)
+lpips_fn = lpips.LPIPS(net='alex').to(device)
+
+def compute_metrics(autoencoder, dataloader):
+    """Compute SNE, PSNR, SSIM, and LPIPS on a subset of the dataset."""
+    autoencoder.eval()
+    total_sne, total_psnr, total_ssim, total_lpips = 0, 0, 0, 0
+    num_samples = 0
+
+    with torch.no_grad():
+        for noisy_imgs, clean_imgs in dataloader:
+            noisy_imgs, clean_imgs = noisy_imgs.to(device), clean_imgs.to(device)
+            outputs = autoencoder(noisy_imgs)
+
+            total_sne += torch.sum((noisy_imgs - clean_imgs) ** 2).item()
+            total_psnr += TF.peak_signal_noise_ratio(outputs, clean_imgs).sum().item()
+            total_ssim += TF.structural_similarity_index_measure(outputs, clean_imgs).sum().item()
+            total_lpips += lpips_fn(outputs, clean_imgs).sum().item()
+            
+            num_samples += noisy_imgs.size(0)
+
+    return {
+        "SNE": total_sne / num_samples,
+        "PSNR": total_psnr / num_samples,
+        "SSIM": total_ssim / num_samples,
+        "LPIPS": total_lpips / num_samples
+    }
+
+# Training loop with metrics computation
+num_epochs = 50
+losses = []
+
 for epoch in range(num_epochs):
     running_loss = 0.0
+    autoencoder.train()
+
     for noisy_imgs, clean_imgs in dataloader:
         noisy_imgs, clean_imgs = noisy_imgs.to(device), clean_imgs.to(device)
 
@@ -125,8 +161,15 @@ for epoch in range(num_epochs):
         optimizer.step()
 
         running_loss += loss.item()
-    losses.append(running_loss/len(dataloader))
-    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(dataloader):.4f}")
+
+    avg_loss = running_loss / len(dataloader)
+    losses.append(avg_loss)
+
+    # Compute evaluation metrics at the end of each epoch
+    metrics = compute_metrics(autoencoder, dataloader)
+
+    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
+    print(f" -> SNE: {metrics['SNE']:.4f}, PSNR: {metrics['PSNR']:.4f}, SSIM: {metrics['SSIM']:.4f}, LPIPS: {metrics['LPIPS']:.4f}")
 
 print("Training complete!")
 
