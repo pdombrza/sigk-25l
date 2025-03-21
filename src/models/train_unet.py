@@ -1,7 +1,6 @@
 from datetime import timedelta
 
 import torch
-import torchvision
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPIPS
@@ -18,23 +17,31 @@ class UNetModel(L.LightningModule):
     def __init__(self, model: UNet | None = None, lambda_lpips: float | None = None, lambda_l1: float | None = None):
         super(UNetModel, self).__init__()
         self.unet = UNet(in_channels=3) if model is None else model
-        self.l1_loss = nn.L1Loss()
+        self.mse = nn.MSELoss()
         self.perceptual_loss = LPIPS(net_type='vgg')
         self.lambda_lpips = lambda_lpips if lambda_lpips is not None else 1.0
         self.lambda_l1 = lambda_l1 if lambda_l1 is not None else 1.0
+        self.automatic_optimization = False
 
     def training_step(self, batch, batch_idx):
+        optimizer = self.optimizers()
+        optimizer.zero_grad()
+
         input = batch['input']
         target = batch['target']
         prediction = self.unet(input)
         prediction = self._normalize_output(prediction, min_val=torch.min(prediction), max_val=torch.max(prediction))
-        l1_loss = self.l1_loss(prediction, target) * self.lambda_l1
+        mse = self.mse(prediction, target) * self.lambda_l1
         perceptual_loss = self.perceptual_loss(prediction, target) * self.lambda_lpips
-        loss = l1_loss + perceptual_loss
+        loss = mse + perceptual_loss
+
+        self.manual_backward(loss)
+        optimizer.step()
+
         self.log_dict({
-            'l1_loss': l1_loss,
+            'mse_loss': mse,
             'perceptual_loss': perceptual_loss,
-            'loss': loss,
+            'total_loss': loss,
         })
 
     def validation_step(self, batch, batch_idx):
@@ -59,8 +66,9 @@ class UNetModel(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.unet.parameters(), lr=0.0001)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
-        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}
+        #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+        #return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}
+        return {"optimizer": optimizer}
 
     def forward(self, x):
         return self.unet(x)
@@ -72,14 +80,14 @@ class UNetModel(L.LightningModule):
 
 
 def train():
-    dataset = DeblurringDataset(images_path='data/DIV2K_train_LR_bicubic/X4')
+    dataset = DeblurringDataset(images_path='data/DIV2K_train_LR_bicubic/X4', blur_kernel=5)
     n_valid_images = 16
     train_size = len(dataset) - n_valid_images
     train_set, valid_set = random_split(dataset, [train_size, n_valid_images])
-    train_loader = DataLoader(train_set, batch_size=4, shuffle=True)
-    valid_loader = DataLoader(valid_set, batch_size=4, shuffle=False)
-    model = UNetModel(lambda_lpips=1.0, lambda_l1=1.0)
-    val_every_n_epochs = 1
+    train_loader = DataLoader(train_set, batch_size=8, num_workers=7, shuffle=True)
+    valid_loader = DataLoader(valid_set, batch_size=8, num_workers=7, shuffle=False)
+    model = UNetModel(lambda_lpips=0.5, lambda_l1=1.0)
+    val_every_n_epochs = 5
     ckpt_save_dir = "models/unet/"
     logger = TensorBoardLogger("models/unet/tb_logs", "unet")
     checkpoint_callback = ModelCheckpoint(
@@ -95,9 +103,9 @@ def train():
     time_limit = timedelta(hours=1)
 
     trainer = L.Trainer(
-        max_epochs=10,
+        max_epochs=100,
         logger=logger,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, exception_callback],
         max_time=time_limit,
     )
     trainer.fit(model, train_loader, valid_loader)

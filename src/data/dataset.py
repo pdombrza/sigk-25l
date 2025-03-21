@@ -7,7 +7,7 @@ from torchvision.io import ImageReadMode, read_image
 
 
 class DeblurringDataset(Dataset):
-    def __init__(self, images_path, input_transform=None, target_transform=None):
+    def __init__(self, images_path, input_transform=None, target_transform=None, blur_kernel=3):
         self.images_path = images_path
         self.images = os.listdir(images_path)
         self.input_transform = input_transform
@@ -16,7 +16,7 @@ class DeblurringDataset(Dataset):
             self.input_transform = transforms.Compose([
                 transforms.ConvertImageDtype(dtype=torch.float),
                 transforms.Resize((256, 256)),
-                v2.GaussianBlur((3, 3), sigma=(1.5,2.5)),
+                v2.GaussianBlur((blur_kernel, blur_kernel), sigma=(1.5,2.5)),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ])
         if not target_transform:
