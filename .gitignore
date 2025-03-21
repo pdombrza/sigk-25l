@@ -7,3 +7,5 @@ __pycache__
 
 .vscode
 *.ckpt
+DIV2K_train_LR_mild
+
