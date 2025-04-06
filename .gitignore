@@ -9,3 +9,8 @@ __pycache__
 *.ckpt
 DIV2K_train_LR_mild
 
+reference
+output_dir
+reinhard_output
+mantiuk_output
+brisque_MANTIUK_REINHARD.csv
