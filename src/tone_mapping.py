@@ -30,6 +30,36 @@ def tone_map_reinhard(image: ndarray, gamma: float) -> ndarray:
     return result
 
 
+class VGG19Extractor(nn.Module):
+    _LAYER_MAP = {
+        0: "conv1_1", 2: "conv1_2",
+        5: 'conv2_1', 7: 'conv2_2',
+        10: 'conv3_1', 12: 'conv3_2', 14: 'conv3_3', 16: 'conv3_4',
+        19: 'conv4_1', 21: 'conv4_2', 23: 'conv4_3', 25: 'conv4_4',
+        28: 'conv5_1', 30: 'conv5_2', 32: 'conv5_3', 34: 'conv5_4',
+    }
+
+    def __init__(self, chosen_layers):
+        super(VGG19Extractor, self).__init__()
+
+        self.chosen_layers = chosen_layers
+        self.vgg19_layers = nn.Sequential(*list(vgg19(weights='DEFAULT').features.children()))
+
+        for param in self.vgg19_layers.parameters():
+            param.requires_grad = False
+
+    def forward(self, x):
+        features = []
+        for idx, layer in enumerate(self.vgg19_layers):
+            x = layer(x)
+            name = self._LAYER_MAP.get(idx)
+
+            if name in self.chosen_layers:
+                features.append(x)
+
+        return features
+
+
 class NoisyDataset(Dataset):
     def __init__(self, root_folder, transform=None):
         self.transform = transform
@@ -40,7 +70,7 @@ class NoisyDataset(Dataset):
         self.images_ulaw = []
         
         for fname in os.listdir(root_folder):
-            image_src = read_exr("./data/output_dir/" + fname)
+            image_src = read_exr(root_folder + '/' + fname)
             image_hdr = 0.5 * image_src / np.mean(image_src)
             i_hdr = np.median(image_hdr)
             u = 8.759 * i_hdr**2.148 + 0.1494 * i_hdr**(-2.067)
@@ -72,11 +102,11 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
         self.channels = 16
         self.encoder_block = nn.Sequential(
-            nn.Conv2d(in_channels=in_channels, out_channels=self.channels, kernel_size=3, stride=1),
+            nn.Conv2d(in_channels=in_channels, out_channels=self.channels, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels=self.channels, out_channels=2 * self.channels, kernel_size=3, stride=1),
+            nn.Conv2d(in_channels=self.channels, out_channels=2 * self.channels, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels=2 * self.channels, out_channels=4 * self.channels, kernel_size=3, stride=1),
+            nn.Conv2d(in_channels=2 * self.channels, out_channels=4 * self.channels, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
         )
 
@@ -89,7 +119,7 @@ class Fusion(nn.Module):
         super(Fusion, self).__init__()
         self.channels = 3 * in_channels
         self.fusion_block = nn.Sequential(
-            nn.Conv2d(in_channels=self.channels, out_channels=self.channels, kernel_size=3, stride=1),
+            nn.Conv2d(in_channels=self.channels, out_channels=self.channels, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(in_channels=self.channels, out_channels=self.channels, kernel_size=1, stride=1),
             nn.ReLU(inplace=True),
@@ -104,11 +134,11 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.channels = 32
         self.decoder_block = nn.Sequential(
-            nn.Conv2d(in_channels=in_channels, out_channels=self.channels, kernel_size=3, stride=1),
+            nn.Conv2d(in_channels=in_channels, out_channels=self.channels, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels=self.channels, out_channels=self.channels // 2, kernel_size=3, stride=1),
+            nn.Conv2d(in_channels=self.channels, out_channels=self.channels // 2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels=self.channels // 2, out_channels=3, kernel_size=3, stride=1),
+            nn.Conv2d(in_channels=self.channels // 2, out_channels=3, kernel_size=3, stride=1, padding=1),
             nn.Sigmoid()
         )
 
@@ -128,7 +158,7 @@ class ToneMappingModel(nn.Module):
         mid_encoded = self.encoder(img_mid)
         high_encoded = self.encoder(img_high)
         fusion = self.fusion(torch.cat([low_encoded, mid_encoded, high_encoded], dim=1))
-        decoded = self.decoder(fusion) + low_encoded + mid_encoded + high_encoded
+        decoded = self.decoder(fusion) + img_low + img_mid + img_high
         return decoded
 
 
@@ -137,7 +167,8 @@ class TMAP(L.LightningModule):
         super(TMAP, self).__init__()
         self.model = ToneMappingModel() if model is None else model
         self.l1_loss = nn.L1Loss()
-        self.vgg = vgg19(weights='DEFAULT')
+        self.feature_layers = ("conv1_1", "conv2_1", "conv3_1","conv4_1", "conv4_3", "conv5_3")
+        self.vgg = VGG19Extractor(self.feature_layers)
         self.automatic_optimization = False
 
     def normalize_gaussian(self, feature_image, kernel_size, sigma):
@@ -158,10 +189,11 @@ class TMAP(L.LightningModule):
         img_low, img_mid, img_high, img_ulaw = batch
         prediction = self.model(img_low, img_mid, img_high)
 
-        feature_prediction = self.calculate_feature_constrast_masking(self.normalize_gaussian(self.vgg(prediction), 13, 0.25), False)
-        feature_ulaw = self.calculate_feature_constrast_masking(self.normalize_gaussian(self.vgg(img_ulaw), 13, 0.25), True)
-
-        loss = self.l1_loss(feature_prediction, feature_ulaw)
+        loss = 0
+        for feature_prediction, feature_ulaw in zip(self.vgg(prediction), self.vgg(img_ulaw)):
+            feature_prediction_mask = self.calculate_feature_constrast_masking(self.normalize_gaussian(feature_prediction, 13, 0.25), False)
+            feature_ulaw_mask = self.calculate_feature_constrast_masking(self.normalize_gaussian(feature_ulaw, 13, 0.25), True)
+            loss += self.l1_loss(feature_prediction_mask, feature_ulaw_mask) * 1 / len(self.feature_layers)
 
         self.manual_backward(loss)
         optimizer.step()
@@ -171,7 +203,7 @@ class TMAP(L.LightningModule):
         })
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.unet.parameters(), lr=0.0001)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001)
         return {"optimizer": optimizer}
 
     def forward(self, x):
@@ -190,7 +222,7 @@ def train():
     dataset = NoisyDataset(root_folder="./data/output_dir", transform=transform)
     dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
     model = TMAP()
-    logger = TensorBoardLogger("models/unet/tb_logs", "unet")
+    logger = TensorBoardLogger("models/tmap/tb_logs", "tmap")
     ckpt_save_dir = "models/tmap/"
 
     checkpoint_callback = ModelCheckpoint(
@@ -199,17 +231,17 @@ def train():
         every_n_epochs=5,
         save_top_k=-1,
     )
-    exception_callback = OnExceptionCheckpoint(
-        dirpath=ckpt_save_dir,
-        filename="tmap_{epoch}-{step}_ex",
-    )
+    # exception_callback = OnExceptionCheckpoint(
+    #     dirpath=ckpt_save_dir,
+    #     filename="tmap_{epoch}-{step}_ex",
+    # )
     time_limit = timedelta(hours=1)
 
 
     trainer = L.Trainer(
         max_epochs=100,
         logger=logger,
-        callbacks=[checkpoint_callback, exception_callback],
+        callbacks=[checkpoint_callback],
         max_time=time_limit,
     )
     trainer.fit(model, dataloader)
