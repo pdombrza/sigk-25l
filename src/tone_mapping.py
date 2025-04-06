@@ -1,122 +1,219 @@
 import os
+from datetime import timedelta
 import torch
 import torch.optim as optim
 import torch.nn as nn
 import torchvision.transforms as transforms
+from torchvision.models.vgg import vgg19
 from torch.utils.data import DataLoader, Dataset
 import torchmetrics
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 import lpips
+import cv2
+import lightning as L
+from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.callbacks import ModelCheckpoint, OnExceptionCheckpoint
+from numpy import ndarray
+
+EPSILON = 0.000000001
+
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = "1"
+
+def read_exr(im_path: str) -> ndarray:
+    return cv2.imread(filename=im_path, flags=cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+
+def tone_map_reinhard(image: ndarray, gamma: float) -> ndarray: 
+    tonemap_operator = cv2.createTonemapReinhard(gamma=gamma, intensity=0.0, light_adapt=0.0, color_adapt=0.0)
+    result = tonemap_operator.process(src=image)
+    return result
+
 
 class NoisyDataset(Dataset):
-    def __init__(self, root_folder, transform=None, sigma=0.02):
+    def __init__(self, root_folder, transform=None):
         self.transform = transform
-        self.sigma = sigma
 
-        self.images = []
+        self.images_low = []
+        self.images_mid = []
+        self.images_high = []
+        self.images_ulaw = []
         
         for fname in os.listdir(root_folder):
-            if fname.endswith((".jpg", ".png")):
-                image = Image.open(os.path.join(root_folder, fname)).convert("RGB")
-                self.images.append(np.array(image))
+            image_src = read_exr("./data/output_dir/" + fname)
+            image_hdr = 0.5 * image_src / np.mean(image_src)
+            i_hdr = np.median(image_hdr)
+            u = 8.759 * i_hdr**2.148 + 0.1494 * i_hdr**(-2.067)
+
+            self.images_low.append(tone_map_reinhard(image_hdr, 0.5))
+            self.images_mid.append(tone_map_reinhard(image_hdr, 1.2))
+            self.images_high.append(tone_map_reinhard(image_hdr, 2.0))
+            self.images_ulaw.append(np.log10(1.0 + u * image_hdr) / np.log10(1.0 + u))
 
     def __len__(self):
-        return len(self.images)
+        return len(self.images_low)
 
     def __getitem__(self, idx):
-        image = Image.fromarray(self.images[idx])
-
+        img_low = self.images_low[idx]
+        img_mid = self.images_mid[idx]
+        img_high = self.images_high[idx]
+        img_ulaw = self.images_ulaw[idx]
         if self.transform:
-            image = self.transform(image)
+            img_low = self.transform(img_low)
+            img_mid = self.transform(img_mid)
+            img_high = self.transform(img_high)
+            img_ulaw = self.transform(img_ulaw)
 
-        return image
+        return img_low, img_mid, img_high, img_ulaw
 
-transform = transforms.Compose([
-    transforms.ToTensor(),
-])
 
-dataset = NoisyDataset(root_folder="./data/mantiuk_output", transform=transform, sigma=0.01)
-dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
-
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(ResidualBlock, self).__init__()
-        
-        self.layers = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+class Encoder(nn.Module):
+    def __init__(self, in_channels=3):
+        super(Encoder, self).__init__()
+        self.channels = 16
+        self.encoder_block = nn.Sequential(
+            nn.Conv2d(in_channels=in_channels, out_channels=self.channels, kernel_size=3, stride=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels=self.channels, out_channels=2 * self.channels, kernel_size=3, stride=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=2 * self.channels, out_channels=4 * self.channels, kernel_size=3, stride=1),
+            nn.ReLU(inplace=True),
         )
-        
-        self.residual_match = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x):
-        residual = self.residual_match(x)
-        return self.layers(x) + residual
+        return self.encoder_block(x)
 
-class Autoencoder(nn.Module):
-    def __init__(self):
-        super(Autoencoder, self).__init__()
-        
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.AvgPool2d(2, 2),
-            nn.Conv2d(16, 64, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
+    
+class Fusion(nn.Module):
+    def __init__(self, in_channels=64):
+        super(Fusion, self).__init__()
+        self.channels = 3 * in_channels
+        self.fusion_block = nn.Sequential(
+            nn.Conv2d(in_channels=self.channels, out_channels=self.channels, kernel_size=3, stride=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=self.channels, out_channels=self.channels, kernel_size=1, stride=1),
+            nn.ReLU(inplace=True),
         )
-        
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(64, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(16, 3, kernel_size=3, stride=1, padding=1),
+
+    def forward(self, x):
+        return self.fusion_block(x)
+
+
+class Decoder(nn.Module):
+    def __init__(self, in_channels=192):
+        super(Decoder, self).__init__()
+        self.channels = 32
+        self.decoder_block = nn.Sequential(
+            nn.Conv2d(in_channels=in_channels, out_channels=self.channels, kernel_size=3, stride=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=self.channels, out_channels=self.channels // 2, kernel_size=3, stride=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=self.channels // 2, out_channels=3, kernel_size=3, stride=1),
             nn.Sigmoid()
         )
-        
+
     def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return x
+        return self.decoder_block(x)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-lpips_fn = lpips.LPIPS(net='alex').to(device)
-autoencoder = Autoencoder().to(device)
 
-ssim = torchmetrics.StructuralSimilarityIndexMeasure().to(device)
-mse = nn.MSELoss().to(device)
-# MSE + SSIM
-def combined_loss(output, target, alpha=0.5, beta=0.5):
-    mse_loss = mse(output, target)
-    ssim_loss = 1 - ssim(output, target) 
-    return alpha * mse_loss + beta * ssim_loss
+class ToneMappingModel(nn.Module): 
+    def __init__(self):
+        super(ToneMappingModel, self).__init__()
+        self.encoder = Encoder()
+        self.fusion = Fusion()
+        self.decoder = Decoder()
+        
+    def forward(self, img_low, img_mid, img_high):
+        low_encoded = self.encoder(img_low)
+        mid_encoded = self.encoder(img_mid)
+        high_encoded = self.encoder(img_high)
+        fusion = self.fusion(torch.cat([low_encoded, mid_encoded, high_encoded], dim=1))
+        decoded = self.decoder(fusion) + low_encoded + mid_encoded + high_encoded
+        return decoded
 
-optimizer = optim.Adam(autoencoder.parameters(), lr=0.001)
 
-# Initialize LPIPS loss function (AlexNet backbone)
+class TMAP(L.LightningModule):
+    def __init__(self, model=None):
+        super(TMAP, self).__init__()
+        self.model = ToneMappingModel() if model is None else model
+        self.l1_loss = nn.L1Loss()
+        self.vgg = vgg19(weights='DEFAULT')
+        self.automatic_optimization = False
 
-# Training loop with metrics computation
-num_epochs = 50
-losses = []
+    def normalize_gaussian(self, feature_image, kernel_size, sigma):
+        gaussian_filter = transforms.GaussianBlur(kernel_size=(kernel_size, kernel_size), sigma=sigma)
+        blurred_image = gaussian_filter(feature_image)
+        return (feature_image - blurred_image) / (torch.abs(blurred_image) + EPSILON)
+    
+    def calculate_feature_constrast_masking(self, img_c, u_law_processing):
+        img_ms = torch.sign(img_c) * torch.abs(img_c)**(0.5 if u_law_processing else 1.0)
+        std, mean = torch.std_mean(img_c)
+        img_mn = std / (torch.abs(mean) + EPSILON)
+        return img_ms / (1.0 + img_mn)
 
-for epoch in range(num_epochs):
-    running_loss = 0.0
-    autoencoder.train()
-
-    for images in dataloader:
-        images = images.to(device)
-
-        outputs = autoencoder(images)
-        loss = combined_loss(outputs, images)
-
+    def training_step(self, batch, batch_idx):
+        optimizer = self.optimizers()
         optimizer.zero_grad()
-        loss.backward()
+
+        img_low, img_mid, img_high, img_ulaw = batch
+        prediction = self.model(img_low, img_mid, img_high)
+
+        feature_prediction = self.calculate_feature_constrast_masking(self.normalize_gaussian(self.vgg(prediction), 13, 0.25), False)
+        feature_ulaw = self.calculate_feature_constrast_masking(self.normalize_gaussian(self.vgg(img_ulaw), 13, 0.25), True)
+
+        loss = self.l1_loss(feature_prediction, feature_ulaw)
+
+        self.manual_backward(loss)
         optimizer.step()
 
-        running_loss += loss.item()
+        self.log_dict({
+            'l1_loss': loss,
+        })
 
-    avg_loss = running_loss / len(dataloader)
-    losses.append(avg_loss)
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.unet.parameters(), lr=0.0001)
+        return {"optimizer": optimizer}
 
-    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
+    def forward(self, x):
+        return self.model(x)
+
+    def _normalize_output(self, output: torch.Tensor, min_val: float, max_val: float) -> torch.Tensor:
+        output = (output - min_val) / (max_val - min_val)
+        return output * 2.0 - 1.0
+
+
+def train():
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+
+    dataset = NoisyDataset(root_folder="./data/output_dir", transform=transform)
+    dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
+    model = TMAP()
+    logger = TensorBoardLogger("models/unet/tb_logs", "unet")
+    ckpt_save_dir = "models/tmap/"
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=ckpt_save_dir,
+        filename="tmap_{epoch:02d}",
+        every_n_epochs=5,
+        save_top_k=-1,
+    )
+    exception_callback = OnExceptionCheckpoint(
+        dirpath=ckpt_save_dir,
+        filename="tmap_{epoch}-{step}_ex",
+    )
+    time_limit = timedelta(hours=1)
+
+
+    trainer = L.Trainer(
+        max_epochs=100,
+        logger=logger,
+        callbacks=[checkpoint_callback, exception_callback],
+        max_time=time_limit,
+    )
+    trainer.fit(model, dataloader)
+    return model, trainer
+
+if __name__ == "__main__":
+    train()
