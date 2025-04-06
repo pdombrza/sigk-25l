@@ -143,7 +143,7 @@ def compute_metrics(autoencoder, dataloader):
     }
 
 # Training loop with metrics computation
-num_epochs = 50
+num_epochs = 1
 losses = []
 
 for epoch in range(num_epochs):

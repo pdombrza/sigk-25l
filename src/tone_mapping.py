@@ -17,18 +17,23 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, OnExceptionCheckpoint
 from numpy import ndarray
 
-EPSILON = 0.000000001
+EPSILON = 0.0000000001
 
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = "1"
 
 def read_exr(im_path: str) -> ndarray:
     return cv2.imread(filename=im_path, flags=cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
 
-def tone_map_reinhard(image: ndarray, gamma: float) -> ndarray: 
-    tonemap_operator = cv2.createTonemapReinhard(gamma=gamma, intensity=0.0, light_adapt=0.0, color_adapt=0.0)
+def tone_map_reinhard(image: ndarray, gamma: float=2.2) -> ndarray: 
+    # tonemap_operator = cv2.createTonemapReinhard(gamma=gamma, intensity=0.0, light_adapt=1.0, color_adapt=0.0)
+    # result = tonemap_operator.process(src=image)
+    return (image / (image + 1)) ** (1 / gamma)
+    
+
+def tone_map_mantiuk(image: ndarray) -> ndarray:
+    tonemap_operator = cv2.createTonemapMantiuk(gamma=2.2, scale=0.85, saturation=1.2)
     result = tonemap_operator.process(src=image)
     return result
-
 
 class VGG19Extractor(nn.Module):
     _LAYER_MAP = {
@@ -70,15 +75,16 @@ class NoisyDataset(Dataset):
         self.images_ulaw = []
         
         for fname in os.listdir(root_folder):
-            image_src = read_exr(root_folder + '/' + fname)
+            image_src = cv2.cvtColor(read_exr(root_folder + '/' + fname), cv2.COLOR_BGR2RGB)
             image_hdr = 0.5 * image_src / np.mean(image_src)
             i_hdr = np.median(image_hdr)
             u = 8.759 * i_hdr**2.148 + 0.1494 * i_hdr**(-2.067)
 
-            self.images_low.append(tone_map_reinhard(image_hdr, 0.5))
-            self.images_mid.append(tone_map_reinhard(image_hdr, 1.2))
-            self.images_high.append(tone_map_reinhard(image_hdr, 2.0))
+            self.images_low.append(tone_map_reinhard(image_hdr, 3.0))
+            self.images_mid.append(tone_map_reinhard(image_hdr, 2.2))
+            self.images_high.append(tone_map_reinhard(image_hdr, 1.5))
             self.images_ulaw.append(np.log10(1.0 + u * image_hdr) / np.log10(1.0 + u))
+
 
     def __len__(self):
         return len(self.images_low)
@@ -188,13 +194,15 @@ class TMAP(L.LightningModule):
 
         img_low, img_mid, img_high, img_ulaw = batch
         prediction = self.model(img_low, img_mid, img_high)
-
+        tensor_cpu = self._normalize_output(prediction[0], torch.min(prediction[0]), torch.max(prediction[0])).detach().cpu().permute(1, 2, 0)
+        plt.imshow(tensor_cpu.numpy())
+        plt.show()
         loss = 0
         for feature_prediction, feature_ulaw in zip(self.vgg(prediction), self.vgg(img_ulaw)):
             feature_prediction_mask = self.calculate_feature_constrast_masking(self.normalize_gaussian(feature_prediction, 13, 0.25), False)
             feature_ulaw_mask = self.calculate_feature_constrast_masking(self.normalize_gaussian(feature_ulaw, 13, 0.25), True)
-            loss += self.l1_loss(feature_prediction_mask, feature_ulaw_mask) * 1 / len(self.feature_layers)
-
+            loss += self.l1_loss(feature_prediction_mask, feature_ulaw_mask) / len(self.feature_layers)
+        print("LOSS: ", loss)
         self.manual_backward(loss)
         optimizer.step()
 
@@ -211,12 +219,13 @@ class TMAP(L.LightningModule):
 
     def _normalize_output(self, output: torch.Tensor, min_val: float, max_val: float) -> torch.Tensor:
         output = (output - min_val) / (max_val - min_val)
-        return output * 2.0 - 1.0
+        return output
 
 
 def train():
     transform = transforms.Compose([
         transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
 
     dataset = NoisyDataset(root_folder="./data/output_dir", transform=transform)
@@ -243,6 +252,7 @@ def train():
         logger=logger,
         callbacks=[checkpoint_callback],
         max_time=time_limit,
+        log_every_n_steps=1
     )
     trainer.fit(model, dataloader)
     return model, trainer
