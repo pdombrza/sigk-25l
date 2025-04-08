@@ -24,11 +24,23 @@ os.environ['OPENCV_IO_ENABLE_OPENEXR'] = "1"
 def read_exr(im_path: str) -> ndarray:
     return cv2.imread(filename=im_path, flags=cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
 
-def tone_map_reinhard(image: ndarray, gamma: float=2.2) -> ndarray: 
-    # tonemap_operator = cv2.createTonemapReinhard(gamma=gamma, intensity=0.0, light_adapt=1.0, color_adapt=0.0)
-    # result = tonemap_operator.process(src=image)
-    return (image / (image + 1)) ** (1 / gamma)
+def generate_exposures(hdr_img, target_val=1.2):
+    max_val = np.max(hdr_img)
+    median_val = np.median(hdr_img)
     
+    c_start = np.log(target_val / max_val) / np.log(2.0)
+    c_end   = np.log(target_val / median_val) / np.log(2.0)
+    
+    exp_values = [c_start, (c_start + c_end) / 2.0, c_end]
+    
+    exposures = []
+    for exp in exp_values:
+        scaling_factor = np.sqrt(2.0) ** exp
+        scaled_img = hdr_img * scaling_factor
+        exposure_img = np.clip(scaled_img, 0, 1)
+        exposures.append(exposure_img)
+    
+    return exposures
 
 def tone_map_mantiuk(image: ndarray) -> ndarray:
     tonemap_operator = cv2.createTonemapMantiuk(gamma=2.2, scale=0.85, saturation=1.2)
@@ -80,9 +92,18 @@ class NoisyDataset(Dataset):
             i_hdr = np.median(image_hdr)
             u = 8.759 * i_hdr**2.148 + 0.1494 * i_hdr**(-2.067)
 
-            self.images_low.append(tone_map_reinhard(image_hdr, 3.0))
-            self.images_mid.append(tone_map_reinhard(image_hdr, 2.2))
-            self.images_high.append(tone_map_reinhard(image_hdr, 1.5))
+            # plt.imshow(image_hdr)
+            # plt.show()
+            images = generate_exposures(image_hdr)
+            self.images_low.append(images[0])
+            # plt.imshow(self.images_low[-1])
+            # plt.show()
+            self.images_mid.append(images[1])
+            # plt.imshow(self.images_mid[-1])
+            # plt.show()
+            self.images_high.append(images[2])
+            # plt.imshow(self.images_high[-1])
+            # plt.show()
             self.images_ulaw.append(np.log10(1.0 + u * image_hdr) / np.log10(1.0 + u))
 
 
@@ -145,11 +166,12 @@ class Decoder(nn.Module):
             nn.Conv2d(in_channels=self.channels, out_channels=self.channels // 2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(in_channels=self.channels // 2, out_channels=3, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid()
         )
+        self.output_layer = nn.Sigmoid()
 
-    def forward(self, x):
-        return self.decoder_block(x)
+    def forward(self, fusion, img_low, img_mid, img_high):
+        decoder_out = self.decoder_block(fusion)
+        return self.output_layer(decoder_out + img_low + img_mid + img_high)
 
 
 class ToneMappingModel(nn.Module): 
@@ -164,9 +186,8 @@ class ToneMappingModel(nn.Module):
         mid_encoded = self.encoder(img_mid)
         high_encoded = self.encoder(img_high)
         fusion = self.fusion(torch.cat([low_encoded, mid_encoded, high_encoded], dim=1))
-        decoded = self.decoder(fusion) + img_low + img_mid + img_high
+        decoded = self.decoder(fusion, img_low, img_mid, img_high)
         return decoded
-
 
 class TMAP(L.LightningModule):
     def __init__(self, model=None):
@@ -176,16 +197,21 @@ class TMAP(L.LightningModule):
         self.feature_layers = ("conv1_1", "conv2_1", "conv3_1","conv4_1", "conv4_3", "conv5_3")
         self.vgg = VGG19Extractor(self.feature_layers)
         self.automatic_optimization = False
+        self.i = 0
 
     def normalize_gaussian(self, feature_image, kernel_size, sigma):
         gaussian_filter = transforms.GaussianBlur(kernel_size=(kernel_size, kernel_size), sigma=sigma)
         blurred_image = gaussian_filter(feature_image)
+        # print(torch.max(feature_image), torch.min(feature_image))
         return (feature_image - blurred_image) / (torch.abs(blurred_image) + EPSILON)
     
-    def calculate_feature_constrast_masking(self, img_c, u_law_processing):
+    def calculate_feature_constrast_masking(self, kernel_size, img_c, u_law_processing):
+        mean_filter = torch.ones(img_c.shape[1], 1, kernel_size, kernel_size).to(self.device)
+        padding = kernel_size // 2
         img_ms = torch.sign(img_c) * torch.abs(img_c)**(0.5 if u_law_processing else 1.0)
-        std, mean = torch.std_mean(img_c)
-        img_mn = std / (torch.abs(mean) + EPSILON)
+        mean = torch.nn.functional.conv2d(img_c, mean_filter / kernel_size ** 2, padding=padding, groups=img_c.shape[1]).detach()
+        std = (torch.nn.functional.conv2d(img_c ** 2, mean_filter/ kernel_size ** 2, padding=padding, groups=img_c.shape[1]) - mean ** 2).detach()
+        img_mn = torch.sqrt(torch.abs(std)) / (torch.abs(mean) + EPSILON)
         return img_ms / (1.0 + img_mn)
 
     def training_step(self, batch, batch_idx):
@@ -194,15 +220,17 @@ class TMAP(L.LightningModule):
 
         img_low, img_mid, img_high, img_ulaw = batch
         prediction = self.model(img_low, img_mid, img_high)
+        print(torch.min(prediction), torch.max(prediction))
         tensor_cpu = self._normalize_output(prediction[0], torch.min(prediction[0]), torch.max(prediction[0])).detach().cpu().permute(1, 2, 0)
-        plt.imshow(tensor_cpu.numpy())
-        plt.show()
+        if self.i % 10 == 0:
+            plt.imshow(tensor_cpu.numpy())
+            plt.show()
+        self.i += 1
         loss = 0
         for feature_prediction, feature_ulaw in zip(self.vgg(prediction), self.vgg(img_ulaw)):
-            feature_prediction_mask = self.calculate_feature_constrast_masking(self.normalize_gaussian(feature_prediction, 13, 0.25), False)
-            feature_ulaw_mask = self.calculate_feature_constrast_masking(self.normalize_gaussian(feature_ulaw, 13, 0.25), True)
+            feature_prediction_mask = self.calculate_feature_constrast_masking(13, self.normalize_gaussian(feature_prediction, 13, 0.11), False)
+            feature_ulaw_mask = self.calculate_feature_constrast_masking(13, self.normalize_gaussian(feature_ulaw, 13, 0.11), True)
             loss += self.l1_loss(feature_prediction_mask, feature_ulaw_mask) / len(self.feature_layers)
-        print("LOSS: ", loss)
         self.manual_backward(loss)
         optimizer.step()
 
