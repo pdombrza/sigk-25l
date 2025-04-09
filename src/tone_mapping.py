@@ -16,6 +16,7 @@ import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, OnExceptionCheckpoint
 from numpy import ndarray
+from scipy.stats import norm
 
 EPSILON = 0.0000000001
 
@@ -85,6 +86,7 @@ class NoisyDataset(Dataset):
         self.images_mid = []
         self.images_high = []
         self.images_ulaw = []
+        self.images_original = []
         
         for fname in os.listdir(root_folder):
             image_src = cv2.cvtColor(read_exr(root_folder + '/' + fname), cv2.COLOR_BGR2RGB)
@@ -105,6 +107,7 @@ class NoisyDataset(Dataset):
             # plt.imshow(self.images_high[-1])
             # plt.show()
             self.images_ulaw.append(np.log10(1.0 + u * image_hdr) / np.log10(1.0 + u))
+            self.images_original.append(image_hdr)
 
 
     def __len__(self):
@@ -115,13 +118,15 @@ class NoisyDataset(Dataset):
         img_mid = self.images_mid[idx]
         img_high = self.images_high[idx]
         img_ulaw = self.images_ulaw[idx]
+        img_original = self.images_original[idx]
         if self.transform:
             img_low = self.transform(img_low)
             img_mid = self.transform(img_mid)
             img_high = self.transform(img_high)
             img_ulaw = self.transform(img_ulaw)
+            img_original = self.transform(img_original)
 
-        return img_low, img_mid, img_high, img_ulaw
+        return img_low, img_mid, img_high, img_ulaw, img_original
 
 
 class Encoder(nn.Module):
@@ -200,39 +205,88 @@ class TMAP(L.LightningModule):
         self.i = 0
 
     def normalize_gaussian(self, feature_image, kernel_size, sigma):
-        gaussian_filter = transforms.GaussianBlur(kernel_size=(kernel_size, kernel_size), sigma=sigma)
-        blurred_image = gaussian_filter(feature_image)
-        # print(torch.max(feature_image), torch.min(feature_image))
+        interval = (2 * sigma + 1.) / kernel_size
+        space = np.linspace(-sigma - interval / 2., sigma + interval / 2., kernel_size + 1)
+        kern1d = np.diff(norm.cdf(space))
+
+        kernel = np.sqrt(np.outer(kern1d, kern1d))
+        kernel /= kernel.sum()
+        kernel = kernel.astype(np.float32)
+        kernel_tensor = torch.from_numpy(kernel).unsqueeze(0).unsqueeze(0).repeat(feature_image.shape[1], 1, 1, 1).detach().to(self.device)
+    
+        blurred_image = torch.nn.functional.conv2d(feature_image, kernel_tensor, padding='same', groups=feature_image.shape[1]).detach()
+        
         return (feature_image - blurred_image) / (torch.abs(blurred_image) + EPSILON)
     
-    def calculate_feature_constrast_masking(self, kernel_size, img_c, u_law_processing):
-        mean_filter = torch.ones(img_c.shape[1], 1, kernel_size, kernel_size).to(self.device)
+    def calculate_local_mean(self, input_img, kernel_size):
+        mean_filter = torch.ones(input_img.shape[1], 1, kernel_size, kernel_size).to(self.device)
         padding = kernel_size // 2
-        img_ms = torch.sign(img_c) * torch.abs(img_c)**(0.5 if u_law_processing else 1.0)
-        mean = torch.nn.functional.conv2d(img_c, mean_filter / kernel_size ** 2, padding=padding, groups=img_c.shape[1]).detach()
-        std = (torch.nn.functional.conv2d(img_c ** 2, mean_filter/ kernel_size ** 2, padding=padding, groups=img_c.shape[1]) - mean ** 2).detach()
+        # img_ms = torch.sign(input_img) * torch.abs(input_img)**(0.5 if u_law_processing else 1.0)
+        mean = torch.nn.functional.conv2d(input_img, mean_filter / kernel_size ** 2, padding=padding, groups=input_img.shape[1]).detach()
+        std = (torch.nn.functional.conv2d(input_img ** 2, mean_filter/ kernel_size ** 2, padding=padding, groups=input_img.shape[1]) - mean ** 2).detach()
         img_mn = torch.sqrt(torch.abs(std)) / (torch.abs(mean) + EPSILON)
-        return img_ms / (1.0 + img_mn)
+        return img_mn
+
+    def calculate_feature_contrast_masking(self, gauss_out, mean_out, u_law_processing):
+        img_ms = torch.sign(gauss_out) * torch.abs(gauss_out)**(0.5 if u_law_processing else 1.0)
+        return img_ms / (1.0 + mean_out)
+    
+    def compute_luminance(self, img):
+        r, g, b = img[0], img[1], img[2]
+        lum = 0.2126 * r + 0.7152 * g + 0.0722 * b  # Standard luminance formula
+        return lum
+    
+    def restore_color_from_luminance(self, gt_img, pred_lum, a=0.6):
+        r, g, b = gt_img[0], gt_img[1], gt_img[2]
+        y_gt_lum = self.compute_luminance(gt_img) + EPSILON
+
+        restored = torch.zeros_like(gt_img)
+        restored[0] = (r / y_gt_lum)**a * pred_lum
+        restored[1] = (g / y_gt_lum)**a * pred_lum
+        restored[2] = (b / y_gt_lum)**a * pred_lum
+        return restored
 
     def training_step(self, batch, batch_idx):
         optimizer = self.optimizers()
         optimizer.zero_grad()
 
-        img_low, img_mid, img_high, img_ulaw = batch
+        img_low, img_mid, img_high, img_ulaw, img_original = batch
         prediction = self.model(img_low, img_mid, img_high)
-        print(torch.min(prediction), torch.max(prediction))
-        tensor_cpu = self._normalize_output(prediction[0], torch.min(prediction[0]), torch.max(prediction[0])).detach().cpu().permute(1, 2, 0)
-        if self.i % 10 == 0:
-            plt.imshow(tensor_cpu.numpy())
-            plt.show()
-        self.i += 1
+        # print(torch.min(prediction), torch.max(prediction))
+        # tensor_cpu = self._normalize_output(prediction[0], torch.min(prediction[0]), torch.max(prediction[0])).detach().cpu().permute(1, 2, 0)
+        # with torch.no_grad():
+        #     if self.i % 10 == 0:
+        #             plt.imshow(tensor_cpu)
+        #             plt.axis('off')
+        #             plt.show()
+        #     self.i += 1
         loss = 0
         for feature_prediction, feature_ulaw in zip(self.vgg(prediction), self.vgg(img_ulaw)):
-            feature_prediction_mask = self.calculate_feature_constrast_masking(13, self.normalize_gaussian(feature_prediction, 13, 0.11), False)
-            feature_ulaw_mask = self.calculate_feature_constrast_masking(13, self.normalize_gaussian(feature_ulaw, 13, 0.11), True)
+            prediction_gauss = self.normalize_gaussian(feature_prediction, kernel_size=13, sigma=2)
+            prediction_means = self.calculate_local_mean(feature_prediction, kernel_size=13)
+            feature_prediction_mask = self.calculate_feature_contrast_masking(prediction_gauss, prediction_means, u_law_processing=False)
+            ulaw_gauss = self.normalize_gaussian(feature_ulaw, kernel_size=13, sigma=2)
+            ulaw_means = self.calculate_local_mean(feature_ulaw, kernel_size=13)
+            feature_ulaw_mask = self.calculate_feature_contrast_masking(ulaw_gauss, ulaw_means, u_law_processing=True)
             loss += self.l1_loss(feature_prediction_mask, feature_ulaw_mask) / len(self.feature_layers)
         self.manual_backward(loss)
         optimizer.step()
+
+        with torch.no_grad():
+            pred = prediction[0]
+            gt = img_original[0]
+
+            pred_lum = self.compute_luminance(pred)
+            restored_img = self.restore_color_from_luminance(gt, pred_lum)
+            if self.i % 10 == 0:
+                img = restored_img / 100.0 #torch.max(restored_img)
+                print(restored_img.max(), restored_img.min())
+                # img_min = img.min()
+                # img_max = img.max()
+                # img = (img - img_min) / (img_max - img_min + EPSILON)
+                plt.imshow(img.cpu().permute(1, 2, 0).numpy())
+                plt.show()
+            self.i += 1
 
         self.log_dict({
             'l1_loss': loss,
