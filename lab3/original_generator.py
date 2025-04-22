@@ -15,6 +15,6 @@ transform = transforms.Compose([
 dataset = BloodMNIST(split="train", download=True, transform=transform, size=64)
 
 for idx, (img, label) in enumerate(dataset):
-    filename = f"{output_dir}/img_{idx:05d}_label_{label}.png"
+    filename = f"{output_dir}/osample_{idx:05d}_class_{int(label)}.png"
     save_image(img, filename)
 
