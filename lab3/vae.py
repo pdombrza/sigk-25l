@@ -6,23 +6,23 @@ from torch.utils.data import DataLoader
 from medmnist import BloodMNIST
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+from torchvision.utils import save_image
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize([0.5], [0.5])
 ])
 
 train_dataset = BloodMNIST(split="train", download=True, transform=transform, size=64)
-train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
 class VAE(nn.Module):
     def __init__(self, latent_dim=64):
         super(VAE, self).__init__()
         self.latent_dim = latent_dim
 
-        # ------- Encoder -------
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 32, 4, 2, 1),
             nn.BatchNorm2d(32),
@@ -45,7 +45,6 @@ class VAE(nn.Module):
         self.fc_mu = nn.Linear(self.flattened_dim, latent_dim)
         self.fc_logvar = nn.Linear(self.flattened_dim, latent_dim)
 
-        # ------- Decoder -------
         self.fc_decode = nn.Linear(latent_dim, self.flattened_dim)
 
         self.decoder = nn.Sequential(
@@ -92,7 +91,7 @@ def vae_loss(recon_x, x, mu, logvar):
 
 vae = VAE(latent_dim=32).to(device)
 optimizer = optim.Adam(vae.parameters(), lr=1e-3)
-epochs = 50
+epochs = 5
 
 vae.train()
 for epoch in range(epochs):
@@ -132,3 +131,18 @@ for i in range(10):
 plt.suptitle("Original Samples from BloodMNIST (Validation Set)")
 plt.tight_layout()
 plt.show()
+
+# folder to save VAE outputs
+output_dir = "data/generated_vae"
+os.makedirs(output_dir, exist_ok=True)
+
+vae.eval()
+num_samples = 12000
+
+with torch.no_grad():
+    z = torch.randn(num_samples, vae.latent_dim).to(device)
+    gen_imgs = vae.decode(z).cpu()
+
+    for i in range(num_samples):
+        save_path = os.path.join(output_dir, f"sample_{i+1:03d}.png")
+        save_image(gen_imgs[i], save_path)

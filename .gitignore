@@ -14,3 +14,6 @@ output_dir
 reinhard_output
 mantiuk_output
 brisque_MANTIUK_REINHARD.csv
+generated_gan
+generated_vae
+bloodmnist_images

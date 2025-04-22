@@ -6,15 +6,19 @@ from torch.utils.data import DataLoader
 from medmnist import BloodMNIST
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+from torchvision.utils import save_image
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 transform = transforms.Compose([
     transforms.ToTensor(),
+    transforms.Normalize([0.5], [0.5])
 ])
 
 # Dataset
 train_dataset = BloodMNIST(split="train", download=True, transform=transform, size=64)
+print(len(train_dataset))
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
 # Generator
@@ -24,19 +28,19 @@ class Generator(nn.Module):
         self.model = nn.Sequential(
             nn.ConvTranspose2d(latent_dim, 256, 4, 1, 0),  # (N, 256, 4, 4)
             nn.BatchNorm2d(256),
-            nn.ReLU(),
+            nn.ReLU(True),
 
             nn.ConvTranspose2d(256, 128, 4, 2, 1),         # (N, 128, 8, 8)
             nn.BatchNorm2d(128),
-            nn.ReLU(),
+            nn.ReLU(True),
 
             nn.ConvTranspose2d(128, 64, 4, 2, 1),          # (N, 64, 16, 16)
             nn.BatchNorm2d(64),
-            nn.ReLU(),
+            nn.ReLU(True),
 
             nn.ConvTranspose2d(64, 32, 4, 2, 1),           # (N, 32, 32, 32)
             nn.BatchNorm2d(32),
-            nn.ReLU(),
+            nn.ReLU(True),
 
             nn.ConvTranspose2d(32, 3, 4, 2, 1),            # (N, 3, 64, 64)
             nn.Tanh()
@@ -51,15 +55,15 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         self.model = nn.Sequential(
             nn.Conv2d(3, 32, 4, 2, 1),  # (N, 32, 32, 32)
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
 
             nn.Conv2d(32, 64, 4, 2, 1), # (N, 64, 16, 16)
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
 
             nn.Conv2d(64, 128, 4, 2, 1),# (N, 128, 8, 8)
             nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
 
             nn.Conv2d(128, 1, 8),       # (N, 1, 1, 1)
             nn.Sigmoid()
@@ -79,7 +83,7 @@ optimizer_G = optim.Adam(generator.parameters(), lr=0.0002, betas=(0.5, 0.999))
 optimizer_D = optim.Adam(discriminator.parameters(), lr=0.0002, betas=(0.5, 0.999))
 
 # Training loop
-epochs = 50
+epochs = 5
 for epoch in range(epochs):
     g_loss_total = 0
     d_loss_total = 0
@@ -140,3 +144,18 @@ for i in range(10):
 plt.suptitle("Original BloodMNIST Samples")
 plt.tight_layout()
 plt.show()
+
+# folder to save VAE outputs
+output_dir = "data/generated_gan"
+os.makedirs(output_dir, exist_ok=True)
+
+generator.eval()
+num_samples = 12000
+
+with torch.no_grad():
+    z = torch.randn(num_samples, latent_dim, 1, 1).to(device)
+    gen_imgs = generator(z).cpu()
+
+    for i in range(num_samples):
+        save_path = os.path.join(output_dir, f"sample_{i+1:03d}.png")
+        save_image(gen_imgs[i] * 0.5 + 0.5, save_path)
