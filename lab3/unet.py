@@ -129,10 +129,11 @@ class UpBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, t_emb_dim: int = 512, base_channels: int = 64, timesteps=1000):
+    def __init__(self, in_channels: int, out_channels: int, t_emb_dim: int = 512, base_channels: int = 64, timesteps=1000, num_classes=8):
         super(UNet, self).__init__()
         self.in_conv = NormActConv(in_channels, base_channels)
         self.time_embedding = SinusoidalPositionalEmbedding(emb_dim=t_emb_dim, timesteps=timesteps)
+        self.class_embedding = nn.Embedding(num_classes, t_emb_dim)
 
         self.down_block1 = DownBlock(in_channels=base_channels, out_channels=2 * base_channels, t_emb_dim=t_emb_dim)
         self.down_block2 = DownBlock(in_channels=2 * base_channels, out_channels=4 * base_channels, t_emb_dim=t_emb_dim, use_attention=True)
@@ -143,15 +144,17 @@ class UNet(nn.Module):
         self.up_block2 = UpBlock(in_channels=4 * base_channels + 4 * base_channels, out_channels=4 * base_channels, t_emb_dim=t_emb_dim)
         self.up_block3 = UpBlock(in_channels=4 * base_channels + 2 * base_channels, out_channels=2 * base_channels, t_emb_dim=t_emb_dim, use_attention=True)
         self.up_blocks = nn.ModuleList([self.up_block1, self.up_block2, self.up_block3])
-        
+
         self.out_conv = nn.Sequential(
             NormActConv(2 * base_channels + base_channels, base_channels),
             nn.Conv2d(base_channels, out_channels, kernel_size=1)
         )
 
-    def forward(self, x, t):
+    def forward(self, x, t, c):
         x = self.in_conv(x)
         time_embedding = self.time_embedding(t, x.device)
+        class_embedding = self.class_embedding(c)
+        time_embedding = time_embedding + class_embedding
         skip_connections = []
         for block in self.down_blocks:
             x, skip_connection = block(x, time_embedding)
@@ -162,5 +165,5 @@ class UNet(nn.Module):
             x = align_tensor_image(x, skip_connection)
             x = torch.cat([x, skip_connection], dim=1)
             x = block(x, time_embedding)
-        
+
         return self.out_conv(x)
