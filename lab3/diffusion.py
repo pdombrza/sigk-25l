@@ -75,7 +75,7 @@ def train():
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=7)
     num_classes = 8
     val_dataset = BloodMNIST(split="val", download=True, transform=transform, size=64)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=7)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=7)
 
     model = DiffusionModel(num_classes=num_classes)
     val_every_n_epochs = 1
