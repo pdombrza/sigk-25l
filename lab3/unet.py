@@ -23,7 +23,8 @@ class SinusoidalPositionalEmbedding(nn.Module):
         embedding = torch.zeros(timesteps, emb_dim, requires_grad=False)
         embedding[:, 0::2] = torch.sin(position * div)
         embedding[:, 1::2] = torch.cos(position * div)
-        self.embedding = embedding
+        self.register_buffer("embedding", embedding)
+
 
     def forward(self, timestep, device):
         embed = self.embedding[timestep].to(device)
@@ -52,6 +53,7 @@ class Attention(nn.Module):
 
 class NormActConv(nn.Module):
     def __init__(self, in_channels, out_channels, groups=32):
+        super(NormActConv, self).__init__()
         self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1)
         self.norm = nn.GroupNorm(num_groups=groups, num_channels=out_channels)
         self.act = nn.SiLU(inplace=True)
@@ -85,7 +87,7 @@ class ResnetBlock(nn.Module):
 
     def forward(self, x, time):
         residue = x
-        x = self.feature_block(x)
+        x = self.feature_block1(x)
         time = self.time_block(time)
         time_feature = x + time.unsqueeze(-1).unsqueeze(-1)
         time_feature += self.residual_conv(residue)
@@ -123,7 +125,7 @@ class UpBlock(nn.Module):
         x = self.resnet_block1(x, time)
         if self.use_attention:
             x = self.attention(x)
-        x = self.resnet_block2(x)
+        x = self.resnet_block2(x, time)
         x = self.conv_transpose(x)
         return x
 
@@ -162,8 +164,8 @@ class UNet(nn.Module):
 
         for block in self.up_blocks:
             skip_connection = skip_connections.pop()
+            x = block(x, time_embedding)
             x = align_tensor_image(x, skip_connection)
             x = torch.cat([x, skip_connection], dim=1)
-            x = block(x, time_embedding)
 
         return self.out_conv(x)

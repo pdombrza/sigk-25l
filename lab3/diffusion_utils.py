@@ -15,8 +15,8 @@ class DDPMSampler:
         noise = torch.randn_like(original_sample)
         alpha_bars = self.alpha_bars.to(device=original_sample.device, dtype=original_sample.dtype)
         timestep = timestep.to(device=original_sample.device)
-        sqrt_alpha_bars = torch.sqrt(alpha_bars[timestep])  # mean
-        sqrt_one_minus_alpha_bars = torch.sqrt((1.0 - alpha_bars[timestep]))  # stdev
+        sqrt_alpha_bars = torch.sqrt(alpha_bars[timestep]).view(-1, 1, 1, 1)  # mean
+        sqrt_one_minus_alpha_bars = torch.sqrt((1.0 - alpha_bars[timestep])).view(-1, 1, 1, 1)  # stdev
         noisy_samples = (sqrt_alpha_bars * original_sample) + (sqrt_one_minus_alpha_bars) * noise
         return noisy_samples, noise
 
@@ -29,7 +29,7 @@ class DDPMSampler:
 
         mean_image = torch.sqrt(1.0 / alpha_t) * (image - beta_t * predicted_noise / torch.sqrt(1.0 - alpha_bar_t))
 
-        alpha_hat_prev = self.alphas_hat[timestep - 1].to(device)
+        alpha_hat_prev = self.alpha_bars[timestep - 1].to(device)
         beta_t_bar = (1 - alpha_hat_prev) / (1 - alpha_bar_t) * beta_t
         variance = torch.sqrt(beta_t_bar) * torch.randn(image.shape).to(device) if timestep > 0 else 0
 
