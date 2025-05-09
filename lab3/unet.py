@@ -131,11 +131,11 @@ class UpBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, t_emb_dim: int = 256, base_channels: int = 32, timesteps=1000, num_classes=8):
+    def __init__(self, in_channels: int, out_channels: int, t_emb_dim: int = 256, class_emb_dim: int = 8, base_channels: int = 32, timesteps=1000, num_classes=8):
         super(UNet, self).__init__()
-        self.in_conv = NormActConv(in_channels, base_channels)
+        self.in_conv = NormActConv(in_channels + class_emb_dim, base_channels)
         self.time_embedding = SinusoidalPositionalEmbedding(emb_dim=t_emb_dim, timesteps=timesteps)
-        self.class_embedding = nn.Embedding(num_classes, t_emb_dim)
+        self.class_embedding = nn.Embedding(num_classes, class_emb_dim)
 
         self.down_block1 = DownBlock(in_channels=base_channels, out_channels=2 * base_channels, t_emb_dim=t_emb_dim)
         self.down_block2 = DownBlock(in_channels=2 * base_channels, out_channels=4 * base_channels, t_emb_dim=t_emb_dim, use_attention=True)
@@ -154,10 +154,12 @@ class UNet(nn.Module):
         )
 
     def forward(self, x, t, c):
-        x = self.in_conv(x)
+        bs, ch, w, h = x.shape
         time_embedding = self.time_embedding(t, x.device)
         class_embedding = self.class_embedding(c)
-        time_embedding = time_embedding + class_embedding
+        class_embedding = class_embedding.view(bs, class_embedding.shape[1], 1, 1).expand(bs, class_embedding.shape[1], w, h)
+        x = torch.cat([x, class_embedding], dim=1)
+        x = self.in_conv(x)
         skip_connections = []
         for block in self.down_blocks:
             x, skip_connection = block(x, time_embedding)

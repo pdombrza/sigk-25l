@@ -3,13 +3,15 @@ import torch
 import torch.nn as nn
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, OnExceptionCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from medmnist import BloodMNIST
 from diffusion_utils import DDPMSampler
 from unet import UNet
+
+torch.set_float32_matmul_precision('medium')
 
 
 class DiffusionModel(L.LightningModule):
@@ -49,7 +51,10 @@ class DiffusionModel(L.LightningModule):
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
         if batch_idx == 0:
-            self.logger.experiment.add_images("val_images", images, self.current_epoch)
+            #generated_images = [self.forward(torch.randn(2, 3, 64, 64, device=self.device), torch.randint(0, 8, (batch_size, ), device=self.device)) for _ in range(2)]
+            #generated_images = torch.stack(generated_images)
+
+            self.logger.experiment.add_images("generated_images", images, self.current_epoch)
             self.logger.experiment.add_text("val_labels", str(labels.tolist()), self.current_epoch)
         return
 
@@ -79,25 +84,27 @@ def train():
 
     model = DiffusionModel(num_classes=num_classes)
     val_every_n_epochs = 1
-    ckpt_save_dir = "models/diffusion/"
-    logger = TensorBoardLogger("models/diffusion/tb_logs", "unet")
+    ckpt_save_dir = "models/diffusion_v2"
+    logger = TensorBoardLogger("models/diffusion_v2", "tb_logs")
     checkpoint_callback = ModelCheckpoint(
         dirpath=ckpt_save_dir,
-        filename="unet_{epoch:02d}",
+        filename="diffusion_v2_{epoch:02d}",
         every_n_epochs=val_every_n_epochs,
         save_top_k=-1,
     )
-    time_limit = timedelta(hours=3)
+    time_limit = timedelta(hours=5)
 
     trainer = L.Trainer(
         max_epochs=100,
         logger=logger,
         callbacks=[checkpoint_callback],
         max_time=time_limit,
+        default_root_dir="./models/diffusion_v2",
     )
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader, val_loader, ckpt_path="models/diffusion_v2/final_model.ckpt")
     return model, trainer
 
 
 if __name__ == "__main__":
-    train()
+    model, trainer = train()
+    trainer.save_checkpoint("models/diffusion_v2/final_model2.ckpt")

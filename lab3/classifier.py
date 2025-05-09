@@ -11,20 +11,13 @@ from sklearn.metrics import classification_report
 from PIL import Image
 from torch.utils.data import Dataset
 
-# Config
-num_classes = 8
-batch_size = 64
-epochs = 50
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Transform
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize([0.5], [0.5])
-])
 
 # Custom dataset loader using filename to get class
 def get_custom_dataset(path):
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5])
+    ])
     class CustomDataset(Dataset):
         def __init__(self, image_dir, transform=None):
             self.image_dir = image_dir
@@ -35,10 +28,10 @@ def get_custom_dataset(path):
             image_path = os.path.join(self.image_dir, self.image_files[idx])
             image = Image.open(image_path).convert('RGB')  # Ensure image is in RGB format
             label = int(self.image_files[idx].split('_')[3].split('.')[0])  # Convert it to integer
-            
+
             if self.transform:
                 image = self.transform(image)
-            
+
             return image, label
 
         def __len__(self):
@@ -58,6 +51,14 @@ class MedModel(nn.Module):
         return self.model(x)
 
 def train_model(model, train_loader, test_loader):
+    epochs = 50
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Transform
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5])
+    ])
     model.to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -88,6 +89,8 @@ def train_model(model, train_loader, test_loader):
 
 # Setup each scenario
 def run_experiment(train_path, test_path, name):
+    num_classes = 8
+    batch_size = 64
     print(f"\n--- Running experiment: {name} ---")
     train_dataset = get_custom_dataset(train_path)
     test_dataset = get_custom_dataset(test_path)
@@ -99,10 +102,14 @@ def run_experiment(train_path, test_path, name):
     train_model(model, train_loader, test_loader)
 
 # Experiments
-run_experiment("data/bloodmnist_images", "data/generated_gan", "Train on real, test on GAN")
-run_experiment("data/generated_gan", "data/bloodmnist_images", "Train on GAN, test on real")
-run_experiment("data/mixed_gan", "data/mixed_gan", "Train & test on mixed GAN")
+def main():
+    run_experiment("data/bloodmnist_images", "data/generated_gan", "Train on real, test on GAN")
+    run_experiment("data/generated_gan", "data/bloodmnist_images", "Train on GAN, test on real")
+    run_experiment("data/mixed_gan", "data/mixed_gan", "Train & test on mixed GAN")
 
-run_experiment("data/bloodmnist_images", "data/generated_vae", "Train on real, test on VAE")
-run_experiment("data/generated_vae", "data/bloodmnist_images", "Train on VAE, test on real")
-run_experiment("data/mixed_vae", "data/mixed_vae", "Train & test on mixed VAE")
+    run_experiment("data/bloodmnist_images", "data/generated_vae", "Train on real, test on VAE")
+    run_experiment("data/generated_vae", "data/bloodmnist_images", "Train on VAE, test on real")
+    run_experiment("data/mixed_vae", "data/mixed_vae", "Train & test on mixed VAE")
+
+if __name__ == "__main__":
+    main()
